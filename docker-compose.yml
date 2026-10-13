@@ -1,0 +1,17 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: sqlite:////data/flowcare.db
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env before starting}
+      FLOWCARE_DEMO_PASSWORD: ${FLOWCARE_DEMO_PASSWORD:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,capacitor://localhost,https://localhost}
+    volumes:
+      - flowcare-data:/data
+
+volumes:
+  flowcare-data:

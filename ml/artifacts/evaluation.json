@@ -1,0 +1,19 @@
+{
+  "data_type": "synthetic",
+  "rows": 15485,
+  "chronological_split": "12388 train / 3097 test",
+  "test_start": "2026-09-24T15:41:00+00:00",
+  "baseline_mae_minutes": 12.4,
+  "random_forest_mae_minutes": 6.04,
+  "baseline_rmse_minutes": 15.94,
+  "random_forest_rmse_minutes": 7.58,
+  "features": [
+    "patients_ahead",
+    "available_staff",
+    "typical_service_minutes",
+    "occupied_staff",
+    "hour",
+    "is_appointment"
+  ],
+  "warning": "Metrics are synthetic-only and do not establish hospital performance."
+}
