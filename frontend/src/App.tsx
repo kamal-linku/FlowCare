@@ -11,6 +11,59 @@ import { ApiError, api } from "./api";
 import type { Department, Overview, Prediction, SimulationResult, Ticket, User } from "./types";
 
 type Page = "overview" | "queue" | "registration" | "simulation" | "analytics" | "alerts" | "staff" | "settings";
+const REGISTRATION_TIMEZONE = "Asia/Kolkata";
+
+type RegistrationScheduleDraft = {
+  department_id: string;
+  session_name: string;
+  status: "DRAFT" | "PUBLISHED" | "CANCELLED" | "COMPLETED";
+  description: string;
+  session_date: string;
+  total_capacity: number;
+  initial_online_capacity: number;
+  initial_physical_capacity: number;
+  auto_reallocate_online: boolean;
+  session_start_local: string;
+  session_end_local: string;
+  online_open_local: string;
+  online_close_local: string;
+  physical_open_local: string;
+  physical_close_local: string;
+  timezone_name: string;
+};
+
+function dateInTimezone(date: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const part = (type: string) => parts.find((item) => item.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
+
+function createRegistrationScheduleDraft(now = new Date()): RegistrationScheduleDraft {
+  return {
+    department_id: "",
+    session_name: "Morning Registration",
+    status: "DRAFT",
+    description: "",
+    session_date: dateInTimezone(now, REGISTRATION_TIMEZONE),
+    total_capacity: 30,
+    initial_online_capacity: 12,
+    initial_physical_capacity: 18,
+    auto_reallocate_online: true,
+    session_start_local: "09:00",
+    session_end_local: "12:00",
+    online_open_local: "09:00",
+    online_close_local: "10:00",
+    physical_open_local: "10:00",
+    physical_close_local: "12:00",
+    timezone_name: REGISTRATION_TIMEZONE,
+  };
+}
+
 const nav: Array<{ id: Page; label: string; group: string; icon: typeof LayoutDashboard }> = [
   { id: "overview", label: "Overview", group: "WORKSPACE", icon: LayoutDashboard },
   { id: "queue", label: "Live queue", group: "WORKSPACE", icon: Activity },
@@ -390,44 +443,204 @@ function StatusPill({ status }: { status: string }) {
 
 function RegistrationPage({ notify }: { notify: (text: string) => void }) {
   const { value: departments, error, busy, reload } = useLoad<Department[]>(api.departments);
+  const { value: sessions } = useLoad(api.listRegistrationSessions);
   const [department, setDepartment] = useState("");
   const [type, setType] = useState("walk-in");
   const [priority, setPriority] = useState("routine");
   const [name, setName] = useState("");
+  const [selectedSessionId, setSelectedSessionId] = useState("");
   const [saving, setSaving] = useState(false);
   const [created, setCreated] = useState<Ticket | null>(null);
   const options = departments ?? [];
+  const publishedSessions = useMemo(
+    () => (sessions ?? []).filter((session) => session.status === "PUBLISHED" && session.department_id),
+    [sessions],
+  );
   useEffect(() => { if (!department && options.length) setDepartment(options[0].id); }, [department, options]);
+  useEffect(() => {
+    if (!selectedSessionId && publishedSessions.length) setSelectedSessionId(publishedSessions[0].id);
+  }, [selectedSessionId, publishedSessions]);
+  const selectedSession = publishedSessions.find((session) => session.id === selectedSessionId) ?? null;
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (!department) { notify("Choose a department first."); return; }
     setSaving(true);
     try {
-      setCreated(await api.register({
-        department_id: department, appointment_type: type, priority,
-        ...(name.trim() ? { display_name: name.trim() } : {}),
-      }));
-      notify("Patient registered and queue token created.");
+      const patientName = name.trim() || undefined;
+      if (selectedSession) {
+        const booking = await api.bookSession(selectedSession.id, {
+          patient_name: patientName,
+          idempotency_key: `session-${selectedSession.id}-${Date.now()}`,
+        });
+        setCreated({
+          id: booking.id,
+          patient_reference: booking.booking_reference,
+          display_name: booking.patient_name,
+          department_id: selectedSession.department_id ?? department,
+          department: selectedSession.department_name ?? selectedSession.department_code ?? "Registration",
+          token: booking.booking_reference,
+          token_number: 0,
+          appointment_type: "appointment",
+          priority: "routine",
+          status: booking.status,
+          arrival_at: booking.created_at,
+          service_started_at: null,
+          service_completed_at: null,
+          patients_ahead: Math.max(0, selectedSession.confirmed_online_bookings - 1),
+          actual_wait_minutes: null,
+        });
+        notify(`Booked into ${selectedSession.session_name}.`);
+      } else {
+        setCreated(await api.register({
+          department_id: department, appointment_type: type, priority,
+          ...(patientName ? { display_name: patientName } : {}),
+        }));
+        notify("Patient registered and queue token created.");
+      }
       setName("");
     } catch (err) { notify(message(err)); }
     finally { setSaving(false); }
   }
   return <>
-    <PageHeading eyebrow="FRONT DESK" title="Patient registration" description="Create a synthetic patient reference and issue a department-specific queue token." />
+    <PageHeading eyebrow="FRONT DESK" title="Patient registration" description="Create a synthetic patient reference and, when available, book into a published registration schedule." />
     <div className="form-layout"><form className="panel registration-form" onSubmit={submit}>
       <div className="form-section-title"><span className="step-number">01</span><div><h2>Visit details</h2><p>Only minimal operational details are needed.</p></div></div>
       {error && <StatePanel busy={busy} error={error} onRetry={reload} />}
       <label>Department<select required value={department} disabled={busy || !options.length} onChange={(event) => setDepartment(event.target.value)}><option value="">Select department</option>{options.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.available_staff} staff</option>)}</select></label>
+      {publishedSessions.length > 0 && <label>Published registration schedule<select value={selectedSessionId} onChange={(event) => setSelectedSessionId(event.target.value)}><option value="">No schedule selected</option>{publishedSessions.map((session) => <option key={session.id} value={session.id}>{session.session_name} · {session.department_name ?? session.department_code ?? "Department"} · {new Date(session.session_date).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</option>)}</select></label>}
       <label>Display name <span className="optional">(optional; demo only)</span><input maxLength={120} value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Demo patient 01" /></label>
-      <div className="form-row"><label>Visit type<select value={type} onChange={(event) => setType(event.target.value)}><option value="walk-in">Walk-in</option><option value="appointment">Appointment</option></select></label>
-        <label>Queue category<select value={priority} onChange={(event) => setPriority(event.target.value)}><option value="routine">Routine</option><option value="priority">Staff-designated priority</option></select><small>Clinical triage remains a professional decision.</small></label></div>
-      <div className="form-foot"><span><ShieldCheck size={15} /> No medical or contact data collected</span><button className="button button-primary" disabled={saving || busy}>{saving ? "Creating token…" : "Create queue token"}<ArrowUpRight size={15} /></button></div>
+      {!selectedSession && <div className="form-row"><label>Visit type<select value={type} onChange={(event) => setType(event.target.value)}><option value="walk-in">Walk-in</option><option value="appointment">Appointment</option></select></label>
+        <label>Queue category<select value={priority} onChange={(event) => setPriority(event.target.value)}><option value="routine">Routine</option><option value="priority">Staff-designated priority</option></select><small>Clinical triage remains a professional decision.</small></label></div>}
+      <div className="form-foot"><span><ShieldCheck size={15} /> No medical or contact data collected</span><button className="button button-primary" disabled={saving || busy}>{saving ? "Creating token…" : selectedSession ? "Book schedule slot" : "Create queue token"}<ArrowUpRight size={15} /></button></div>
     </form>
-      <aside className="registration-aside"><div className="aside-illustration"><div className="circle circle-one" /><div className="circle circle-two" /><div className="queue-ticket"><span>QUEUE TOKEN</span><strong>{created?.token ?? "—"}</strong><small>OUTPATIENT · TODAY</small></div><div className="float-check"><Check size={18} /></div></div>
-        <div className="aside-copy"><span className="eyebrow">WHAT HAPPENS NEXT</span><h3>One token, a clearer queue.</h3><p>Each ticket gets a private patient reference. Share it with the visitor so they can check their own queue status without seeing other patients' details.</p></div>
-        {created && <div className="created-card"><span className="status-pill status-waiting"><i />WAITING</span><strong>{created.patient_reference}</strong><small>{created.department} · {created.patients_ahead + 1} in queue</small><button className="text-button" onClick={() => { navigator.clipboard?.writeText(created.patient_reference).then(() => notify("Patient reference copied.")); }}>Copy patient reference <Command size={13} /></button></div>}
+      <aside className="registration-aside"><div className="aside-illustration"><div className="circle circle-one" /><div className="circle circle-two" /><div className="queue-ticket"><span>{selectedSession ? "BOOKING REF" : "QUEUE TOKEN"}</span><strong>{created?.token ?? "—"}</strong><small>{selectedSession ? selectedSession.session_name.toUpperCase() : "OUTPATIENT · TODAY"}</small></div><div className="float-check"><Check size={18} /></div></div>
+        <div className="aside-copy"><span className="eyebrow">WHAT HAPPENS NEXT</span><h3>{selectedSession ? "Reserve a published slot" : "One token, a clearer queue."}</h3><p>{selectedSession ? "Patients can register against the published schedule window and receive a booking reference for that session." : "Each ticket gets a private patient reference. Share it with the visitor so they can check their own queue status without seeing other patients' details."}</p></div>
+        {created && <div className="created-card"><span className="status-pill status-waiting"><i />{selectedSession ? "BOOKED" : "WAITING"}</span><strong>{created.patient_reference}</strong><small>{created.department} · {selectedSession ? selectedSession.session_name : `${created.patients_ahead + 1} in queue`}</small><button className="text-button" onClick={() => { navigator.clipboard?.writeText(created.patient_reference).then(() => notify("Patient reference copied.")); }}>Copy patient reference <Command size={13} /></button></div>}
       </aside>
     </div>
+  </>;
+}
+
+function StaffPage({ user, notify }: { user: User; notify: (text: string) => void }) {
+  const departments = useLoad<Department[]>(api.departments);
+  const staff = useLoad<Awaited<ReturnType<typeof api.staff>>>(api.staff);
+  const sessions = useLoad<Awaited<ReturnType<typeof api.listRegistrationSessions>>>(api.listRegistrationSessions);
+  const [now, setNow] = useState(() => new Date());
+  const [tab, setTab] = useState<"departments" | "staff" | "schedules">("departments");
+  const [creating, setCreating] = useState(false);
+  const [staffDraft, setStaffDraft] = useState({ display_name: "", email: "", password: "", role: "receptionist" });
+  const [departmentDraft, setDepartmentDraft] = useState({
+    code: "",
+    name: "",
+    description: "",
+    is_active: true,
+    available_staff: 2,
+    default_service_minutes: 15,
+  });
+  const [scheduleDraft, setScheduleDraft] = useState(createRegistrationScheduleDraft);
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(new Date()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const currentRegistrationTime = new Intl.DateTimeFormat("en-IN", {
+    timeZone: REGISTRATION_TIMEZONE,
+    dateStyle: "full",
+    timeStyle: "medium",
+  }).format(now);
+  if (user.role !== "admin") return <PageHeading eyebrow="ADMINISTRATION" title="Access restricted" description="Only administrators can manage accounts and staff availability." />;
+  async function submitStaff(event: FormEvent) {
+    event.preventDefault();
+    try {
+      await api.createStaff(staffDraft);
+      setStaffDraft({ display_name: "", email: "", password: "", role: "receptionist" });
+      setCreating(false); staff.reload(); notify("Staff account created.");
+    } catch (error) { notify(message(error)); }
+  }
+  async function submitDepartment(event: FormEvent) {
+    event.preventDefault();
+    try {
+      await api.createDepartment({
+        ...departmentDraft,
+        description: departmentDraft.description.trim() || null,
+      });
+      setDepartmentDraft({ code: "", name: "", description: "", is_active: true, available_staff: 2, default_service_minutes: 15 });
+      departments.reload(); notify("Department created.");
+    } catch (error) { notify(message(error)); }
+  }
+  async function submitSchedule(event: FormEvent) {
+    event.preventDefault();
+    try {
+      await api.createRegistrationSession({
+        ...scheduleDraft,
+        department_id: scheduleDraft.department_id || null,
+        description: scheduleDraft.description.trim() || null,
+      });
+      setScheduleDraft(createRegistrationScheduleDraft());
+      sessions.reload(); notify("Registration schedule created.");
+    } catch (error) { notify(message(error)); }
+  }
+  async function changeAvailability(dept: Department, value: number) {
+    try { await api.updateAvailability(dept.id, value); departments.reload(); notify(`${dept.name} availability updated.`); }
+    catch (error) { notify(message(error)); }
+  }
+  async function toggleDepartmentActive(dept: Department) {
+    try {
+      await api.updateDepartment(dept.id, {
+        code: dept.code,
+        name: dept.name,
+        is_active: !dept.is_active,
+        description: dept.description ?? null,
+        available_staff: dept.available_staff,
+        default_service_minutes: dept.default_service_minutes,
+      });
+      departments.reload(); notify(`${dept.name} active state updated.`);
+    } catch (error) { notify(message(error)); }
+  }
+  async function updateScheduleStatus(session: Awaited<ReturnType<typeof api.listRegistrationSessions>>[number], nextStatus: "DRAFT" | "PUBLISHED" | "CANCELLED" | "COMPLETED") {
+    try {
+      await api.updateRegistrationSession(session.id, { status: nextStatus });
+      sessions.reload(); notify(`Schedule status updated to ${nextStatus}.`);
+    } catch (error) { notify(message(error)); }
+  }
+  return <>
+    <PageHeading eyebrow="ADMINISTRATION" title="Staff & departments" description="Manage access, capacity, and registration schedule lifecycle." action={<div className="heading-actions"><button className="button button-secondary" onClick={() => setTab("departments")}>Departments</button><button className="button button-secondary" onClick={() => setTab("staff")}>Staff</button><button className="button button-primary" onClick={() => setTab("schedules")}>Schedules</button></div>} />
+    <div className="schedule-clock panel" aria-label="Current registration time">
+      <span className="schedule-clock-icon"><Clock3 size={18} /></span>
+      <div><strong>Current registration time</strong><span>{currentRegistrationTime}</span></div>
+      <small>Live · {REGISTRATION_TIMEZONE}</small>
+    </div>
+    {tab === "departments" && <div className="management-grid">
+      <section className="panel staff-create"><h2>New department</h2><form onSubmit={submitDepartment}><div className="form-row"><label>Department name<input required minLength={2} maxLength={120} value={departmentDraft.name} onChange={(e) => setDepartmentDraft({ ...departmentDraft, name: e.target.value })} /></label><label>Code<input required minLength={2} maxLength={10} pattern="[A-Z0-9]+" value={departmentDraft.code} onChange={(e) => setDepartmentDraft({ ...departmentDraft, code: e.target.value.toUpperCase() })} /></label></div><div className="form-row"><label>Available staff<input type="number" required min={0} max={100} value={departmentDraft.available_staff} onChange={(e) => setDepartmentDraft({ ...departmentDraft, available_staff: Number(e.target.value) })} /></label><label>Typical service minutes<input type="number" required min={1} max={240} value={departmentDraft.default_service_minutes} onChange={(e) => setDepartmentDraft({ ...departmentDraft, default_service_minutes: Number(e.target.value) })} /></label></div><label>Notes<textarea value={departmentDraft.description} onChange={(e) => setDepartmentDraft({ ...departmentDraft, description: e.target.value })} rows={3} placeholder="Any local operating notes for this department" /></label><label className="inline-toggle"><input type="checkbox" checked={departmentDraft.is_active} onChange={(e) => setDepartmentDraft({ ...departmentDraft, is_active: e.target.checked })} /> Active in scheduling and queue routing</label><button className="button button-primary">Create department</button></form></section>
+      <section className="panel table-panel"><div className="panel-heading"><div><h2>Department roster</h2><p>Current staffing and active states</p></div></div><StatePanel busy={departments.busy} error={departments.error} onRetry={departments.reload} empty={!departments.busy && !(departments.value?.length)} />{departments.value?.map((dept) => <div className="availability-row" key={dept.id}><div><strong>{dept.name}</strong><small>{dept.default_service_minutes} min typical service</small></div><label className="staff-count">{dept.available_staff}<small>available</small></label><button className="icon-button" aria-label={`Decrease ${dept.name} staffing`} disabled={dept.available_staff <= 0} onClick={() => changeAvailability(dept, dept.available_staff - 1)}>−</button><button className="icon-button" aria-label={`Increase ${dept.name} staffing`} onClick={() => changeAvailability(dept, dept.available_staff + 1)}>+</button><button className="button button-secondary" onClick={() => toggleDepartmentActive(dept)}>{dept.is_active ? "Disable" : "Enable"}</button></div>)}</section>
+    </div>}
+    {tab === "staff" && <div className="management-grid">
+      <section className="panel staff-create"><h2>New staff account</h2>{creating ? <form onSubmit={submitStaff}><div className="form-row"><label>Name<input required maxLength={120} value={staffDraft.display_name} onChange={(e) => setStaffDraft({ ...staffDraft, display_name: e.target.value })} /></label><label>Email<input required type="email" value={staffDraft.email} onChange={(e) => setStaffDraft({ ...staffDraft, email: e.target.value })} /></label></div><div className="form-row"><label>Role<select value={staffDraft.role} onChange={(e) => setStaffDraft({ ...staffDraft, role: e.target.value })}><option value="receptionist">Receptionist</option><option value="staff">Department staff</option><option value="admin">Administrator</option></select></label><label>Temporary password<input required type="password" minLength={12} value={staffDraft.password} onChange={(e) => setStaffDraft({ ...staffDraft, password: e.target.value })} /><small>At least 12 characters; share securely outside this app.</small></label></div><button className="button button-primary">Create account</button></form> : <button className="button button-primary" onClick={() => setCreating(true)}><Plus size={16} /> Add staff account</button>}</section>
+      <section className="panel table-panel"><div className="panel-heading"><div><h2>Staff accounts</h2><p>Role-based access to FlowCare</p></div></div><StatePanel busy={staff.busy} error={staff.error} onRetry={staff.reload} empty={!staff.busy && !(staff.value?.length)} />{!!staff.value?.length && <div className="staff-list">{staff.value.map((item) => <div className="staff-row" key={item.id}><span className="avatar">{item.display_name[0]}</span><div><strong>{item.display_name}</strong><small>{item.email}</small></div><span className="role-tag">{item.role}</span></div>)}</div>}</section>
+    </div>}
+    {tab === "schedules" && <div className="management-grid">
+      <section className="panel staff-create">
+        <h2>Create registration schedule</h2>
+        <form onSubmit={submitSchedule}>
+          <label>Department<select value={scheduleDraft.department_id} onChange={(e) => setScheduleDraft({ ...scheduleDraft, department_id: e.target.value })}><option value="">Select department</option>{departments.value?.map((dept) => <option key={dept.id} value={dept.id}>{dept.name}</option>)}</select></label>
+          <label>Schedule name<input required value={scheduleDraft.session_name} onChange={(e) => setScheduleDraft({ ...scheduleDraft, session_name: e.target.value })} /></label>
+          <div className="form-row">
+            <label>Registration date<input type="date" required value={scheduleDraft.session_date} onChange={(e) => setScheduleDraft({ ...scheduleDraft, session_date: e.target.value })} /></label>
+            <label>Status<select value={scheduleDraft.status} onChange={(e) => setScheduleDraft({ ...scheduleDraft, status: e.target.value as RegistrationScheduleDraft["status"] })}><option value="DRAFT">Draft</option><option value="PUBLISHED">Published</option><option value="CANCELLED">Cancelled</option><option value="COMPLETED">Completed</option></select></label>
+          </div>
+          <div className="form-row">
+            <label>Registration starts<input type="time" required value={scheduleDraft.session_start_local} onChange={(e) => setScheduleDraft({ ...scheduleDraft, session_start_local: e.target.value })} /></label>
+            <label>Registration ends<input type="time" required value={scheduleDraft.session_end_local} onChange={(e) => setScheduleDraft({ ...scheduleDraft, session_end_local: e.target.value })} /></label>
+          </div>
+          <div className="form-row"><label>Total capacity<input type="number" min={1} value={scheduleDraft.total_capacity} onChange={(e) => setScheduleDraft({ ...scheduleDraft, total_capacity: Number(e.target.value) })} /></label><label>Auto reallocate online<input type="checkbox" checked={scheduleDraft.auto_reallocate_online} onChange={(e) => setScheduleDraft({ ...scheduleDraft, auto_reallocate_online: e.target.checked })} /></label></div>
+          <div className="form-row"><label>Online slots<input type="number" min={0} value={scheduleDraft.initial_online_capacity} onChange={(e) => setScheduleDraft({ ...scheduleDraft, initial_online_capacity: Number(e.target.value) })} /></label><label>Physical slots<input type="number" min={0} value={scheduleDraft.initial_physical_capacity} onChange={(e) => setScheduleDraft({ ...scheduleDraft, initial_physical_capacity: Number(e.target.value) })} /></label></div>
+          <div className="form-row"><label>Online open<input type="time" value={scheduleDraft.online_open_local} onChange={(e) => setScheduleDraft({ ...scheduleDraft, online_open_local: e.target.value })} /></label><label>Online close<input type="time" value={scheduleDraft.online_close_local} onChange={(e) => setScheduleDraft({ ...scheduleDraft, online_close_local: e.target.value })} /></label></div>
+          <div className="form-row"><label>Physical open<input type="time" value={scheduleDraft.physical_open_local} onChange={(e) => setScheduleDraft({ ...scheduleDraft, physical_open_local: e.target.value })} /></label><label>Physical close<input type="time" value={scheduleDraft.physical_close_local} onChange={(e) => setScheduleDraft({ ...scheduleDraft, physical_close_local: e.target.value })} /></label></div>
+          <label>Description<textarea value={scheduleDraft.description} onChange={(e) => setScheduleDraft({ ...scheduleDraft, description: e.target.value })} rows={3} placeholder="Notes, clinic hours, or operating instructions" /></label>
+          <button className="button button-primary">Create schedule</button>
+        </form>
+      </section>
+      <section className="panel table-panel"><div className="panel-heading"><div><h2>Registration schedules</h2><p>Lifecycle and capacity visibility</p></div></div><StatePanel busy={sessions.busy} error={sessions.error} onRetry={sessions.reload} empty={!sessions.busy && !(sessions.value?.length)} />{!!sessions.value?.length && <div className="staff-list">{sessions.value.map((session) => <div className="staff-row" key={session.id}><div><strong>{session.session_name}</strong><small>{session.department_name ?? session.department_code ?? "Unassigned"} · {new Date(`${session.session_date}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })} · {session.session_start_local.slice(0, 5)}–{session.session_end_local.slice(0, 5)} ({session.timezone_name})</small></div><span className="role-tag">{session.status}</span><div className="heading-actions"><button className="button button-secondary" onClick={() => updateScheduleStatus(session, "PUBLISHED")} disabled={session.status === "PUBLISHED"}>Publish</button><button className="button button-secondary" onClick={() => updateScheduleStatus(session, "CANCELLED")} disabled={session.status === "CANCELLED"}>Cancel</button></div></div>)}</div>}</section>
+    </div>}
   </>;
 }
 
@@ -499,48 +712,6 @@ function AlertsPage({ notify }: { notify: (text: string) => void }) {
     <div className="notice-banner"><span className="notice-icon"><AlertTriangle size={18} /></span><div><strong>Signals need human interpretation</strong><span>Queue size can indicate congestion; it does not establish its cause or prescribe clinical action.</span></div></div>
     <StatePanel busy={alerts.busy} error={alerts.error} onRetry={alerts.reload} empty={!alerts.busy && !(alerts.value?.length)} />
     {!!alerts.value?.length && <div className="alerts-list">{alerts.value.map((alert) => <article className="panel alert-card" key={alert.department}><span className={`alert-severity severity-${alert.severity}`}><AlertTriangle size={17} /></span><div className="alert-body"><div><span className="eyebrow">{alert.severity} SIGNAL</span><h2>{alert.department}</h2></div><p>{alert.message}</p><small>{alert.waiting} currently waiting · review current staffing and arrival conditions</small></div><button className="button button-secondary" onClick={() => notify(`Review ${alert.department} queue, staff availability, and arrival conditions before deciding on an action.`)}>Review signal</button></article>)}</div>}
-  </>;
-}
-
-function StaffPage({ user, notify }: { user: User; notify: (text: string) => void }) {
-  const departments = useLoad<Department[]>(api.departments);
-  const staff = useLoad<Awaited<ReturnType<typeof api.staff>>>(api.staff);
-  const [creating, setCreating] = useState(false);
-  const [addingDepartment, setAddingDepartment] = useState(false);
-  const [staffDraft, setStaffDraft] = useState({ display_name: "", email: "", password: "", role: "receptionist" });
-  const [departmentDraft, setDepartmentDraft] = useState({
-    code: "",
-    name: "",
-    available_staff: 2,
-    default_service_minutes: 15,
-  });
-  if (user.role !== "admin") return <PageHeading eyebrow="ADMINISTRATION" title="Access restricted" description="Only administrators can manage accounts and staff availability." />;
-  async function submitStaff(event: FormEvent) {
-    event.preventDefault();
-    try {
-      await api.createStaff(staffDraft);
-      setStaffDraft({ display_name: "", email: "", password: "", role: "receptionist" });
-      setCreating(false); staff.reload(); notify("Staff account created.");
-    } catch (error) { notify(message(error)); }
-  }
-  async function submitDepartment(event: FormEvent) {
-    event.preventDefault();
-    try {
-      await api.createDepartment(departmentDraft);
-      setDepartmentDraft({ code: "", name: "", available_staff: 2, default_service_minutes: 15 });
-      setAddingDepartment(false); departments.reload(); notify("Department created.");
-    } catch (error) { notify(message(error)); }
-  }
-  async function changeAvailability(dept: Department, value: number) {
-    try { await api.updateAvailability(dept.id, value); departments.reload(); notify(`${dept.name} availability updated.`); }
-    catch (error) { notify(message(error)); }
-  }
-  return <>
-    <PageHeading eyebrow="ADMINISTRATION" title="Staff & departments" description="Manage staff accounts and department availability." action={<div className="heading-actions"><button className="button button-secondary" onClick={() => setAddingDepartment(!addingDepartment)}><Plus size={16} /> Add department</button><button className="button button-primary" onClick={() => setCreating(!creating)}><Plus size={16} /> Add staff account</button></div>} />
-    {addingDepartment && <form className="panel staff-create" onSubmit={submitDepartment}><h2>New department</h2><div className="form-row"><label>Department name<input required minLength={2} maxLength={120} value={departmentDraft.name} onChange={(e) => setDepartmentDraft({ ...departmentDraft, name: e.target.value })} /></label><label>Code<input required minLength={2} maxLength={10} pattern="[A-Z0-9]+" value={departmentDraft.code} onChange={(e) => setDepartmentDraft({ ...departmentDraft, code: e.target.value.toUpperCase() })} /></label></div><div className="form-row"><label>Available staff<input type="number" required min={0} max={100} value={departmentDraft.available_staff} onChange={(e) => setDepartmentDraft({ ...departmentDraft, available_staff: Number(e.target.value) })} /></label><label>Typical service minutes<input type="number" required min={1} max={240} value={departmentDraft.default_service_minutes} onChange={(e) => setDepartmentDraft({ ...departmentDraft, default_service_minutes: Number(e.target.value) })} /></label></div><button className="button button-primary">Create department</button></form>}
-    {creating && <form className="panel staff-create" onSubmit={submitStaff}><h2>New staff account</h2><div className="form-row"><label>Name<input required maxLength={120} value={staffDraft.display_name} onChange={(e) => setStaffDraft({ ...staffDraft, display_name: e.target.value })} /></label><label>Email<input required type="email" value={staffDraft.email} onChange={(e) => setStaffDraft({ ...staffDraft, email: e.target.value })} /></label></div><div className="form-row"><label>Role<select value={staffDraft.role} onChange={(e) => setStaffDraft({ ...staffDraft, role: e.target.value })}><option value="receptionist">Receptionist</option><option value="staff">Department staff</option><option value="admin">Administrator</option></select></label><label>Temporary password<input required type="password" minLength={12} value={staffDraft.password} onChange={(e) => setStaffDraft({ ...staffDraft, password: e.target.value })} /><small>At least 12 characters; share securely outside this app.</small></label></div><button className="button button-primary">Create account</button></form>}
-    <div className="management-grid"><section className="panel table-panel"><div className="panel-heading"><div><h2>Staff accounts</h2><p>Role-based access to FlowCare</p></div></div><StatePanel busy={staff.busy} error={staff.error} onRetry={staff.reload} empty={!staff.busy && !(staff.value?.length)} />{!!staff.value?.length && <div className="staff-list">{staff.value.map((item) => <div className="staff-row" key={item.id}><span className="avatar">{item.display_name[0]}</span><div><strong>{item.display_name}</strong><small>{item.email}</small></div><span className="role-tag">{item.role}</span></div>)}</div>}</section>
-      <section className="panel department-manage"><div className="panel-heading"><div><h2>Department staffing</h2><p>Available staff for prediction inputs</p></div></div><StatePanel busy={departments.busy} error={departments.error} onRetry={departments.reload} empty={!departments.busy && !(departments.value?.length)} />{departments.value?.map((dept) => <div className="availability-row" key={dept.id}><div><strong>{dept.name}</strong><small>{dept.default_service_minutes} min typical service</small></div><label className="staff-count">{dept.available_staff}<small>available</small></label><button className="icon-button" aria-label={`Decrease ${dept.name} staffing`} disabled={dept.available_staff <= 0} onClick={() => changeAvailability(dept, dept.available_staff - 1)}>−</button><button className="icon-button" aria-label={`Increase ${dept.name} staffing`} onClick={() => changeAvailability(dept, dept.available_staff + 1)}>+</button></div>)}</section></div>
   </>;
 }
 

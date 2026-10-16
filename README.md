@@ -32,6 +32,10 @@ The web client uses a same-origin `/api` Vite proxy in local development and `VI
 
 Appointment scheduling, per-stage workflows, staff schedules/break calendars, alert acknowledgement storage, refresh tokens, PostgreSQL concurrency stress tests, and calibrated uncertainty intervals are intentionally future extensions, not represented as complete features.
 
+### Dynamic registration capacity manager
+
+FlowCare now includes a backend-enforced daily registration session model for the Dynamic Registration Capacity Manager. The default seed config in `backend/app/main.py` creates a `Morning Registration` session for each date with `total_capacity = 30`, `initial_online_capacity = 12`, and `initial_physical_capacity = 18`. The session uses `Asia/Kolkata` time and lazily reconciles the cutoff at `10:00` before physical registration is accepted. Admin routes are available under `/api/admin/registration/sessions` and public booking routes under `/api/registration/...`.
+
 ### API contracts
 
 Interactive OpenAPI documentation is available at `http://localhost:8000/docs`.

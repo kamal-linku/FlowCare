@@ -1,4 +1,4 @@
-import type { Department, Overview, Prediction, SimulationResult, Ticket, User } from "./types";
+import type { Department, Overview, Prediction, RegistrationSession, SimulationResult, Ticket, User } from "./types";
 
 const base = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
 const TOKEN_KEY = "flowcare-token";
@@ -98,10 +98,73 @@ export const api = {
   createDepartment: (payload: {
     code: string;
     name: string;
+    is_active?: boolean;
+    description?: string | null;
     available_staff: number;
     default_service_minutes: number;
   }) =>
     request<Department>("/api/departments", { method: "POST", body: JSON.stringify(payload) }),
+  updateDepartment: (departmentId: string, payload: {
+    code: string;
+    name: string;
+    is_active?: boolean;
+    description?: string | null;
+    available_staff: number;
+    default_service_minutes: number;
+  }) =>
+    request<Department>(`/api/departments/${encodeURIComponent(departmentId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  bookSession: (sessionId: string, payload: { patient_name?: string; idempotency_key?: string }) =>
+    request<{ id: string; booking_reference: string; session_id: string; channel: string; status: string; patient_name: string | null; created_at: string; confirmed_at: string; cancelled_at: string | null; cancellation_reason: string | null; idempotency_key: string | null }>(`/api/registration/sessions/${encodeURIComponent(sessionId)}/online-bookings`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  listRegistrationSessions: () => request<RegistrationSession[]>("/api/registration/sessions"),
+  createRegistrationSession: (payload: {
+    department_id?: string | null;
+    session_name: string;
+    status?: "DRAFT" | "PUBLISHED" | "CANCELLED" | "COMPLETED";
+    description?: string | null;
+    session_date: string;
+    total_capacity: number;
+    initial_online_capacity: number;
+    initial_physical_capacity: number;
+    auto_reallocate_online?: boolean;
+    session_start_local: string;
+    session_end_local: string;
+    online_open_local: string;
+    online_close_local: string;
+    physical_open_local: string;
+    physical_close_local: string;
+    timezone_name?: string;
+  }) =>
+    request<RegistrationSession>("/api/admin/registration/sessions", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateRegistrationSession: (sessionId: string, payload: Partial<{
+    department_id?: string | null;
+    session_name: string;
+    status: "DRAFT" | "PUBLISHED" | "CANCELLED" | "COMPLETED";
+    description: string | null;
+    total_capacity: number;
+    initial_online_capacity: number;
+    initial_physical_capacity: number;
+    auto_reallocate_online: boolean;
+    session_start_local: string;
+    session_end_local: string;
+    online_open_local: string;
+    online_close_local: string;
+    physical_open_local: string;
+    physical_close_local: string;
+    timezone_name: string;
+  }>) =>
+    request<RegistrationSession>(`/api/admin/registration/sessions/${encodeURIComponent(sessionId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
   createStaff: (payload: { email: string; display_name: string; role: string; password: string }) =>
     request<{ id: string }>("/api/staff", { method: "POST", body: JSON.stringify(payload) }),
   updateAvailability: (departmentId: string, available_staff: number) =>

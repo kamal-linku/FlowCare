@@ -81,7 +81,7 @@ def predict_wait(db: Session, ticket: QueueTicket) -> dict:
     estimate: float | None = None
     if servers == 0:
         influences = ["No staff currently available; a finite wait estimate is unavailable."]
-    elif (model := _load_model()) is not None:
+    elif (model := _load_model()) is not None and completed_durations:
         estimate = max(0.0, float(model.predict(features)[0]))
         model_used = "trained-random-forest"
     elif server_free_at:

@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from fastapi.testclient import TestClient
 
+from app.core.config import settings
 from app.core.database import Base, engine
 from app.core.security import hash_password
 from app.main import app
@@ -118,6 +119,37 @@ def test_public_signup_creates_receptionist_and_returns_login_token():
         )
         assert login.status_code == 200
         assert login.json()["user"]["role"] == "receptionist"
+
+
+def test_bootstrap_admin_requires_single_initial_account():
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+    original_demo_password = settings.flowcare_demo_password
+    settings.flowcare_demo_password = None
+    try:
+        with TestClient(app) as client:
+            first = client.post(
+                "/api/admin/bootstrap",
+                json={
+                    "email": "initial@example.com",
+                    "display_name": "Initial Admin",
+                    "password": "secure-bootstrap-password",
+                },
+            )
+            assert first.status_code == 201
+            assert first.json()["user"]["role"] == "admin"
+
+            second = client.post(
+                "/api/admin/bootstrap",
+                json={
+                    "email": "second@example.com",
+                    "display_name": "Second Admin",
+                    "password": "secure-bootstrap-password",
+                },
+            )
+            assert second.status_code == 409
+    finally:
+        settings.flowcare_demo_password = original_demo_password
 
 
 def test_concurrent_registration_issues_unique_tokens():
